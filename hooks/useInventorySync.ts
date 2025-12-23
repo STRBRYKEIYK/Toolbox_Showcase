@@ -1,12 +1,9 @@
 // ============================================================================
 // hooks/useInventorySync.ts
-// Real-time inventory synchronization hook for Toolbox
+// Mock real-time inventory synchronization hook for Toolbox Demo
 // ============================================================================
-import { useEffect, useCallback, useRef } from 'react'
-import { pollingManager } from '../../src/utils/api/websocket/polling-manager.jsx'
-import { SOCKET_EVENTS, SOCKET_ROOMS } from '../../src/utils/api/websocket/constants/events.js'
-import { InventoryEventHandler } from '../../src/utils/api/websocket/handlers/inventory-handler.js'
-import { ProcurementEventHandler } from '../../src/utils/api/websocket/handlers/procurement-handler.js'
+import { useEffect, useCallback, useRef, useState } from 'react'
+import env from '../lib/env'
 
 interface InventoryChangeEvent {
   type: 'update' | 'insert' | 'remove' | 'create' | 'delete' | 'checkout' | 'po_received'
@@ -34,156 +31,90 @@ export function useInventorySync(options: UseInventorySyncOptions = {}) {
     enabled = true
   } = options
 
-  const handlersRegistered = useRef(false)
-  const unsubscribers = useRef<(() => void)[]>([])
+  const [isConnected, setIsConnected] = useState(true) // Always "connected" in demo mode
+  const intervalRef = useRef<NodeJS.Timeout | null>(null)
 
-  // Initialize polling manager and register handlers
+  // Mock polling behavior - simulate periodic inventory checks
   useEffect(() => {
-    if (!enabled) return
+    if (!enabled || !env.DEMO_MODE) return
 
-    // Register event handlers only once
-    if (!handlersRegistered.current) {
-      // Create handlers (they register themselves with the manager)
-      new InventoryEventHandler(pollingManager)
-      new ProcurementEventHandler(pollingManager)
-      
-      // Initialize polling
-      pollingManager.initialize()
-      
-      // Join inventory and procurement rooms
-      pollingManager.joinRoom(SOCKET_ROOMS.INVENTORY)
-      pollingManager.joinRoom(SOCKET_ROOMS.PROCUREMENT)
-      
-      handlersRegistered.current = true
-      console.log('📦 Inventory sync initialized')
-    }
-
-    return () => {
-      // Cleanup is handled separately
-    }
-  }, [enabled])
-
-  // Subscribe to inventory refresh events
-  useEffect(() => {
-    if (!enabled) return
-
-    const unsubInventoryRefresh = pollingManager.subscribeToUpdates(
-      'inventory:refresh',
-      (event: InventoryChangeEvent) => {
-        console.log('📦 Inventory refresh event:', event)
-        onInventoryChange?.(event)
+    // Simulate periodic inventory refresh (every 30 seconds in demo)
+    intervalRef.current = setInterval(() => {
+      // Randomly trigger inventory change events for demo purposes
+      if (Math.random() < 0.1) { // 10% chance every 30 seconds
+        const mockEvent: InventoryChangeEvent = {
+          type: 'update',
+          itemNo: `DEMO-${Math.floor(Math.random() * 1000)}`,
+          quantity: Math.floor(Math.random() * 10) + 1
+        }
+        console.log('📦 [Demo] Mock inventory change:', mockEvent)
+        onInventoryChange?.(mockEvent)
       }
-    )
-
-    unsubscribers.current.push(unsubInventoryRefresh)
+    }, 30000)
 
     return () => {
-      unsubInventoryRefresh()
+      if (intervalRef.current) {
+        clearInterval(intervalRef.current)
+        intervalRef.current = null
+      }
     }
   }, [enabled, onInventoryChange])
 
-  // Subscribe to specific inventory events
+  // Listen for checkout events from localStorage (simulates real-time updates)
   useEffect(() => {
-    if (!enabled || !onItemChange) return
+    if (!enabled) return
 
-    const events = [
-      SOCKET_EVENTS.INVENTORY.UPDATED,
-      SOCKET_EVENTS.INVENTORY.INSERTED,
-      SOCKET_EVENTS.INVENTORY.REMOVED,
-      SOCKET_EVENTS.INVENTORY.ITEM_CREATED,
-      SOCKET_EVENTS.INVENTORY.ITEM_UPDATED,
-      SOCKET_EVENTS.INVENTORY.ITEM_DELETED
-    ]
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'demo-transactions' && e.newValue) {
+        try {
+          const transactions = JSON.parse(e.newValue)
+          const latestTransaction = transactions[transactions.length - 1]
 
-    const unsubs = events.map(event =>
-      pollingManager.subscribeToUpdates(event, onItemChange)
-    )
-
-    unsubscribers.current.push(...unsubs)
-
-    return () => {
-      unsubs.forEach(unsub => unsub())
+          if (latestTransaction) {
+            console.log('📦 [Demo] Checkout detected:', latestTransaction)
+            onCheckout?.(latestTransaction)
+            onLogCreated?.(latestTransaction)
+          }
+        } catch (error) {
+          console.warn('📦 [Demo] Error parsing demo transactions:', error)
+        }
+      }
     }
-  }, [enabled, onItemChange])
 
-  // Subscribe to checkout events
+    window.addEventListener('storage', handleStorageChange)
+    return () => window.removeEventListener('storage', handleStorageChange)
+  }, [enabled, onCheckout, onLogCreated])
+
+  // Mock PO changes (less frequent)
   useEffect(() => {
-    if (!enabled || !onCheckout) return
+    if (!enabled || !env.DEMO_MODE) return
 
-    const unsub = pollingManager.subscribeToUpdates(
-      SOCKET_EVENTS.INVENTORY.CHECKOUT_COMPLETED,
-      onCheckout
-    )
+    const poInterval = setInterval(() => {
+      if (Math.random() < 0.05) { // 5% chance every 60 seconds
+        const mockPOEvent = {
+          type: 'po_received',
+          poId: `PO-${Date.now()}`,
+          status: 'received'
+        }
+        console.log('📦 [Demo] Mock PO change:', mockPOEvent)
+        onPOChange?.(mockPOEvent)
+      }
+    }, 60000)
 
-    unsubscribers.current.push(unsub)
-
-    return () => {
-      unsub()
-    }
-  }, [enabled, onCheckout])
-
-  // Subscribe to employee log events
-  useEffect(() => {
-    if (!enabled || !onLogCreated) return
-
-    const unsub = pollingManager.subscribeToUpdates(
-      SOCKET_EVENTS.INVENTORY.LOG_CREATED,
-      onLogCreated
-    )
-
-    unsubscribers.current.push(unsub)
-
-    return () => {
-      unsub()
-    }
-  }, [enabled, onLogCreated])
-
-  // Subscribe to procurement events
-  useEffect(() => {
-    if (!enabled || !onPOChange) return
-
-    const unsubPORefresh = pollingManager.subscribeToUpdates(
-      'procurement:refresh',
-      onPOChange
-    )
-
-    const events = [
-      SOCKET_EVENTS.PROCUREMENT.PO_CREATED,
-      SOCKET_EVENTS.PROCUREMENT.PO_UPDATED,
-      SOCKET_EVENTS.PROCUREMENT.PO_DELETED,
-      SOCKET_EVENTS.PROCUREMENT.PO_STATUS_CHANGED,
-      SOCKET_EVENTS.PROCUREMENT.PO_APPROVED,
-      SOCKET_EVENTS.PROCUREMENT.PO_REJECTED,
-      SOCKET_EVENTS.PROCUREMENT.PO_RECEIVED
-    ]
-
-    const unsubs = events.map(event =>
-      pollingManager.subscribeToUpdates(event, onPOChange)
-    )
-
-    unsubscribers.current.push(unsubPORefresh, ...unsubs)
-
-    return () => {
-      unsubPORefresh()
-      unsubs.forEach(unsub => unsub())
-    }
+    return () => clearInterval(poInterval)
   }, [enabled, onPOChange])
 
-  // Manual refresh trigger
+  // Manual refresh trigger (mock implementation)
   const triggerRefresh = useCallback(() => {
-    pollingManager.ping()
-  }, [])
-
-  // Get connection status
-  const isConnected = pollingManager.isConnected
-
-  // Cleanup on unmount
-  useEffect(() => {
-    return () => {
-      unsubscribers.current.forEach(unsub => unsub())
-      unsubscribers.current = []
+    console.log('📦 [Demo] Manual refresh triggered')
+    // Simulate an immediate inventory refresh
+    const mockEvent: InventoryChangeEvent = {
+      type: 'update',
+      itemNo: 'REFRESH_TRIGGERED',
+      quantity: 0
     }
-  }, [])
+    onInventoryChange?.(mockEvent)
+  }, [onInventoryChange])
 
   return {
     isConnected,

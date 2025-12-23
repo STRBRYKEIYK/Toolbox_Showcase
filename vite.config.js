@@ -41,7 +41,10 @@ export default defineConfig({
     },
     chunkSizeWarningLimit: 1000,
   },
-  
+
+  // Configure for subdirectory deployment
+  base: '/tb-demo-app/',
+
   // Optimize dependencies
   optimizeDeps: {
     include: ['react', 'react-dom', 'lucide-react'],

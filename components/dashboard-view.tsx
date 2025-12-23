@@ -24,8 +24,6 @@ import useGlobalBarcodeScanner from "../hooks/use-global-barcode-scanner"
 import BarcodeModal from "./barcode-modal"
 import { useInventorySync } from "../hooks/useInventorySync"
 import { IndustrialTooltip } from "./ui/tooltip"
-import { SOCKET_EVENTS } from "../../src/utils/api/websocket/constants/events.js"
-import { pollingManager } from "../../src/utils/api/websocket/polling-manager.jsx"
 
 
 interface DashboardViewProps {

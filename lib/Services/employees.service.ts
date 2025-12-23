@@ -1,5 +1,5 @@
 import type { ApiConfig } from '../api-config'
-import { API_ENDPOINTS } from '../api-config'
+import { getDemoEmployees } from '../mock-data'
 
 /**
  * Employee interface - represents employee data structure
@@ -53,60 +53,18 @@ export class EmployeesService {
    * @param includeAllStatuses - If true, fetch all employees including Inactive/Disabled ones
    */
   async fetchEmployees(includeAllStatuses: boolean = true): Promise<any[]> {
-    try {
-      // Build URL with query params to include all statuses (Active, Inactive, On Leave, etc.)
-      // This is needed so we can show proper error messages for disabled employees
-      const url = new URL(`${this.config.baseUrl}${API_ENDPOINTS.employees}`)
-      if (includeAllStatuses) {
-        url.searchParams.set('includeAllStatuses', 'true')
-      }
-      
-      const response = await fetch(url.toString(), {
-        method: "GET",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        mode: "cors",
-        signal: AbortSignal.timeout(10000),
-      })
-
-      if (!response.ok) {
-        throw new Error(`Failed to fetch employees: ${response.status} ${response.statusText}`)
-      }
-
-      const data = await response.json()
-      
-      // Handle response structure consistently
-      let employees: any[] = []
-      if (data && typeof data === 'object') {
-        if (data.success && data.employees && Array.isArray(data.employees)) {
-          // Handle structure: {success: true, employees: [...]}
-          employees = data.employees
-        } else if (data.success && data.data && data.data.employees && Array.isArray(data.data.employees)) {
-          // Handle nested structure: {success: true, data: {employees: [...], ...}}
-          employees = data.data.employees
-        } else if (data.success && Array.isArray(data.data)) {
-          // Handle flat structure: {success: true, data: [...]}
-          employees = data.data
-        } else if (Array.isArray(data)) {
-          // Handle direct array: [...]
-          employees = data
-        } else {
-          console.log("[EmployeesService] Unexpected API response structure:", Object.keys(data))
-          if (data.data && typeof data.data === 'object') {
-            console.log("[EmployeesService] data.data structure:", Object.keys(data.data))
-          }
-          throw new Error("Invalid employees response structure")
-        }
-      } else {
-        throw new Error("Invalid API response format")
-      }
-      
-      console.log("[EmployeesService] Successfully fetched employees from API:", employees.length, "employees")
-      return employees
-    } catch (error) {
-      console.error("[EmployeesService] Failed to fetch employees:", error)
-      throw error
-    }
+    // Demo mode only - return mock employees
+    console.log("[EmployeesService] Demo mode: Returning mock employees")
+    const mockEmployees = getDemoEmployees()
+    return mockEmployees.map(employee => ({
+      id: employee.id,
+      fullName: employee.name,
+      firstName: employee.name.split(' ')[0],
+      lastName: employee.name.split(' ').slice(1).join(' '),
+      department: employee.department,
+      status: 'Active',
+      idBarcode: employee.id,
+      idNumber: employee.id
+    }))
   }
 }

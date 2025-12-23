@@ -8,8 +8,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog"
 import { useToast } from "../hooks/use-toast"
 import { apiService } from "../lib/api_service"
 import { exportLogsToXLSX } from "../lib/export-utils"
-import { pollingManager } from "../../src/utils/api/websocket/polling-manager.jsx"
-import { SOCKET_EVENTS } from "../../src/utils/api/websocket/constants/events.js"
+import env from "../lib/env"
 
 interface Log {
   id: number | string
@@ -82,28 +81,21 @@ export function EmployeeLogsView({ className = "" }: EmployeeLogsViewProps) {
     fetchLogs()
   }, [fetchLogs])
 
-  // Real-time updates
+  // Real-time updates (Demo mode - listen for localStorage changes)
   useEffect(() => {
-    pollingManager.initialize()
+    if (!env.DEMO_MODE) return
 
-    const unsub1 = pollingManager.subscribeToUpdates(
-      SOCKET_EVENTS.INVENTORY.LOG_CREATED,
-      () => {
+    const handleStorageChange = (e: StorageEvent) => {
+      if (e.key === 'demo-transactions' && e.newValue) {
+        console.log('📝 [Demo] Transaction logs updated, refreshing...')
         if (currentPage === 1) {
           fetchLogs(true)
         }
       }
-    )
-
-    const unsub2 = pollingManager.subscribeToUpdates(
-      "inventory:logs:refresh",
-      () => fetchLogs(true)
-    )
-
-    return () => {
-      unsub1?.()
-      unsub2?.()
     }
+
+    window.addEventListener('storage', handleStorageChange)
+    return () => window.removeEventListener('storage', handleStorageChange)
   }, [fetchLogs, currentPage])
 
   // Export handler

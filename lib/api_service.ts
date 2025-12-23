@@ -135,21 +135,61 @@ export class ApiServices {
    * Get list of images for an item
    */
   async getItemImages(itemId: number): Promise<any> {
-    return this.itemsService.getItemImages(itemId)
+    // Get item data to generate mock images
+    const items = getDemoProducts()
+    const item = items.find(i => i.id === itemId.toString() || i.item_no === itemId)
+
+    if (item) {
+      // Return mock image data
+      return {
+        success: true,
+        data: [{
+          filename: `${item.item_name || item.name || 'item'}.jpg`,
+          url: this.generateImageUrlFromItemName(item.item_name || item.name || 'Unknown Item')
+        }]
+      }
+    }
+
+    return { success: true, data: [] }
   }
 
   /**
    * Build URL for latest image (direct <img src>)
    */
-  getItemLatestImageUrl(itemId: number): string {
-    return this.itemsService.getItemLatestImageUrl(itemId)
+  getItemLatestImageUrl(itemId: number): string | null {
+    // Get item data to use name for image search
+    const items = getDemoProducts()
+    const item = items.find(i => i.id === itemId.toString() || i.item_no === itemId)
+    if (item) {
+      return this.generateImageUrlFromItemName(item.item_name || item.name || 'Unknown Item')
+    }
+    return null
   }
 
   /**
    * Build URL for a specific image filename
    */
-  getItemImageUrl(itemId: number, filename: string): string {
-    return this.itemsService.getItemImageUrl(itemId, filename)
+  getItemImageUrl(itemId: number, filename: string): string | null {
+    // Get item data to use name for image search
+    const items = getDemoProducts()
+    const item = items.find(i => i.id === itemId.toString() || i.item_no === itemId)
+    if (item) {
+      return this.generateImageUrlFromItemName(item.item_name || item.name || 'Unknown Item')
+    }
+    return null
+  }
+
+  /**
+   * Generate image URL based on item name using placeholder service
+   */
+  private generateImageUrlFromItemName(itemName: string): string {
+    // Clean the item name for URL
+    const cleanName = itemName.replace(/[^a-zA-Z0-9\s]/g, '').trim()
+    const encodedName = encodeURIComponent(cleanName)
+
+    // Use a placeholder service that can display text
+    // We'll use placeholder.com which can show text
+    return `https://via.placeholder.com/300x200/4f46e5/ffffff?text=${encodedName}`
   }
 
   // ========================================

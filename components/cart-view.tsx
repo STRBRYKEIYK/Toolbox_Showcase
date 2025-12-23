@@ -42,7 +42,11 @@ function CartItemImage({ itemId, itemName }: { itemId: string; itemName: string 
     }
     
     const url = apiService.getItemLatestImageUrl(numericItemId)
-    setImageUrl(`${url}?t=${Date.now()}`)
+    if (url) {
+      setImageUrl(`${url}?t=${Date.now()}`)
+    } else {
+      setImageUrl(null)
+    }
   }, [itemId])
 
   return (

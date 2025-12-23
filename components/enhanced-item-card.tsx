@@ -45,7 +45,7 @@ export const EnhancedItemCard = React.memo<EnhancedItemCardProps>(({
   const [imageLoaded, setImageLoaded] = useState(false)
   const [imageUrl, setImageUrl] = useState<string | null>(null)
   
-  // Robust image loading with fallback and retry logic
+  // Simplified image loading - use generated URL directly
   useEffect(() => {
     setImageError(false)
     setImageLoaded(false)
@@ -69,68 +69,17 @@ export const EnhancedItemCard = React.memo<EnhancedItemCardProps>(({
       return
     }
 
-    const loadImageWithFallback = async (retryCount = 0) => {
-      try {
-        console.log(`[EnhancedItemCard] Loading image for item ${itemId}, attempt ${retryCount + 1}`)
-
-        // First try to get the image list (like item detail view)
-        const res = await apiService.getItemImages(itemId)
-        if (res?.success && res.data && res.data.length > 0) {
-          // Use the first image from the list
-          const firstImage = res.data[0]
-          const url = apiService.getItemImageUrl(itemId, firstImage.filename)
-          console.log(`[EnhancedItemCard] Using image from list: ${url}`)
-          imageCache.set(cacheKey, url)
-          setImageUrl(url)
-          setImageLoaded(true)
-          return
-        }
-
-        // If no images in list, fall back to latest image
-        console.log(`[EnhancedItemCard] No images in list, falling back to latest image`)
-        const latestUrl = apiService.getItemLatestImageUrl(itemId)
-        console.log(`[EnhancedItemCard] Using latest image: ${latestUrl}`)
-        imageCache.set(cacheKey, latestUrl)
-        setImageUrl(latestUrl)
-        setImageLoaded(true)
-
-      } catch (error) {
-        console.error(`[EnhancedItemCard] Failed to load image for item ${itemId}:`, error)
-
-        // Debug image endpoints for troubleshooting
-        if (process.env.NODE_ENV === 'development') {
-          console.log(`[EnhancedItemCard] Debugging image endpoints for item ${itemId}...`)
-          const imagesUrl = `${apiService.getConfig().baseUrl}/api/items/images/${itemId}`
-          const latestUrl = apiService.getItemLatestImageUrl(itemId)
-
-          await debugImageEndpoint(itemId, 'images list', imagesUrl)
-          await debugImageEndpoint(itemId, 'latest image', latestUrl)
-        }
-
-        // Log additional debugging info for server issues
-        if (error instanceof Error) {
-          if (error.message.includes('Failed to fetch')) {
-            console.warn(`[EnhancedItemCard] Network error - check if image server is running and accessible`)
-          } else if (error.message.includes('404')) {
-            console.warn(`[EnhancedItemCard] Image endpoint returned 404 - check if item ${itemId} has images`)
-          } else if (error.message.includes('403') || error.message.includes('401')) {
-            console.warn(`[EnhancedItemCard] Authentication error - check API token and permissions`)
-          }
-        }
-
-        // Retry logic with exponential backoff (max 3 retries)
-        if (retryCount < 3) {
-          const delay = Math.pow(2, retryCount) * 1000 // 1s, 2s, 4s
-          console.log(`[EnhancedItemCard] Retrying in ${delay}ms...`)
-          setTimeout(() => loadImageWithFallback(retryCount + 1), delay)
-        } else {
-          console.error(`[EnhancedItemCard] All retry attempts failed for item ${itemId}`)
-          setImageError(true)
-        }
-      }
+    // Generate image URL directly from item name
+    const generatedUrl = apiService.getItemLatestImageUrl(itemId)
+    if (generatedUrl) {
+      console.log(`[EnhancedItemCard] Using generated image URL for item ${itemId}: ${generatedUrl}`)
+      imageCache.set(cacheKey, generatedUrl)
+      setImageUrl(generatedUrl)
+      setImageLoaded(true)
+    } else {
+      setImageUrl(null)
+      setImageLoaded(true)
     }
-
-    loadImageWithFallback()
   }, [product?.id])
 
   const isAddDisabled = product.status === 'out-of-stock' || (typeof product.balance === 'number' && product.balance <= 0)
@@ -218,7 +167,7 @@ export const EnhancedItemCard = React.memo<EnhancedItemCardProps>(({
                   const itemId = typeof product.id === 'number' ? product.id : parseInt(product.id, 10)
                   if (!isNaN(itemId)) {
                     const fallbackUrl = apiService.getItemLatestImageUrl(itemId)
-                    if (fallbackUrl !== imageUrl) {
+                    if (fallbackUrl && fallbackUrl !== imageUrl) {
                       setImageUrl(fallbackUrl)
                       return
                     }

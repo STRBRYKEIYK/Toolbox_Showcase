@@ -1,110 +1,149 @@
-import { z } from "zod"
+// Mock validation schemas and functions for demo mode
+// Replaces Zod with simple validation logic
 
-// Input validation schemas
-export const BarcodeSchema = z.string()
-  .trim()
-  .min(1, "Barcode cannot be empty")
-  .max(50, "Barcode too long")
-  .regex(/^[A-Za-z0-9]+$/, "Barcode can only contain letters and numbers")
-  .refine(
-    (val) => {
-      // Allow ITM format (ITM001, ITM024, etc.) or plain numbers
-      return /^ITM\d{1,6}$/i.test(val) || /^\d{1,6}$/.test(val) || /^[A-Za-z0-9]{1,20}$/.test(val);
-    },
-    "Invalid barcode format. Expected ITM followed by numbers or plain item ID"
-  )
+// Input validation schemas (mock implementations)
+export const BarcodeSchema = {
+  parse: (input: string) => {
+    if (typeof input !== 'string') throw new Error('Barcode must be a string')
+    const trimmed = input.trim()
+    if (trimmed.length === 0) throw new Error('Barcode cannot be empty')
+    if (trimmed.length > 50) throw new Error('Barcode too long')
+    if (!/^[A-Za-z0-9]+$/.test(trimmed)) throw new Error('Barcode can only contain letters and numbers')
 
-export const ItemIdSchema = z.string()
-  .trim()
-  .min(1, "Item ID cannot be empty")
-  .max(20, "Item ID too long")
-  .regex(/^[A-Za-z0-9]+$/, "Item ID can only contain letters and numbers")
-  .refine(
-    (val) => {
-      // Allow ITM format, plain numbers, or alphanumeric IDs
-      return /^ITM\d{1,6}$/i.test(val) || /^\d{1,6}$/.test(val) || /^[A-Za-z0-9]{1,20}$/.test(val);
-    },
-    "Invalid item ID format"
-  )
+    // Allow ITM format (ITM001, ITM024, etc.) or plain numbers
+    if (!(/^ITM\d{1,6}$/i.test(trimmed) || /^\d{1,6}$/.test(trimmed) || /^[A-Za-z0-9]{1,20}$/.test(trimmed))) {
+      throw new Error('Invalid barcode format. Expected ITM followed by numbers or plain item ID')
+    }
+    return trimmed
+  }
+}
 
-export const QuantitySchema = z.number()
-  .int("Quantity must be a whole number")
-  .min(1, "Quantity must be at least 1")
-  .max(1000, "Quantity cannot exceed 1000")
+export const ItemIdSchema = {
+  parse: (input: string) => {
+    if (typeof input !== 'string') throw new Error('Item ID must be a string')
+    const trimmed = input.trim()
+    if (trimmed.length === 0) throw new Error('Item ID cannot be empty')
+    if (trimmed.length > 20) throw new Error('Item ID too long')
+    if (!/^[A-Za-z0-9]+$/.test(trimmed)) throw new Error('Item ID can only contain letters and numbers')
 
-export const EmployeeIdSchema = z.string()
-  .trim()
-  .min(1, "Employee ID cannot be empty")
-  .max(20, "Employee ID too long")
-  .regex(/^[A-Za-z0-9_-]+$/, "Employee ID format invalid")
+    // Allow ITM format, plain numbers, or alphanumeric IDs
+    if (!(/^ITM\d{1,6}$/i.test(trimmed) || /^\d{1,6}$/.test(trimmed) || /^[A-Za-z0-9]{1,20}$/.test(trimmed))) {
+      throw new Error('Invalid item ID format')
+    }
+    return trimmed
+  }
+}
 
-export const UsernameSchema = z.string()
-  .trim()
-  .min(2, "Username must be at least 2 characters")
-  .max(50, "Username too long")
-  .regex(/^[A-Za-z0-9_.\s-]+$/, "Username contains invalid characters")
+export const QuantitySchema = {
+  parse: (input: number) => {
+    if (typeof input !== 'number' || !Number.isInteger(input)) throw new Error('Quantity must be a whole number')
+    if (input < 1) throw new Error('Quantity must be at least 1')
+    if (input > 1000) throw new Error('Quantity cannot exceed 1000')
+    return input
+  }
+}
 
-export const ApiUrlSchema = z.string()
-  .url("Invalid URL format")
-  .refine(
-    (url) => url.startsWith("http://") || url.startsWith("https://"),
-    "URL must start with http:// or https://"
-  )
+export const EmployeeIdSchema = {
+  parse: (input: string) => {
+    if (typeof input !== 'string') throw new Error('Employee ID must be a string')
+    const trimmed = input.trim()
+    if (trimmed.length === 0) throw new Error('Employee ID cannot be empty')
+    if (trimmed.length > 20) throw new Error('Employee ID too long')
+    if (!/^[A-Za-z0-9_-]+$/.test(trimmed)) throw new Error('Employee ID format invalid')
+    return trimmed
+  }
+}
 
-export const SearchQuerySchema = z.string()
-  .trim()
-  .max(100, "Search query too long")
-  .regex(/^[A-Za-z0-9\s._-]*$/, "Search query contains invalid characters")
+export const UsernameSchema = {
+  parse: (input: string) => {
+    if (typeof input !== 'string') throw new Error('Username must be a string')
+    const trimmed = input.trim()
+    if (trimmed.length < 2) throw new Error('Username must be at least 2 characters')
+    if (trimmed.length > 50) throw new Error('Username too long')
+    if (!/^[A-Za-z0-9_.\s-]+$/.test(trimmed)) throw new Error('Username contains invalid characters')
+    return trimmed
+  }
+}
 
-// API response validation schemas
-// Note: balance and item_status are calculated by the database and should be trusted as-is
-export const ApiItemSchema = z.object({
-  item_no: z.union([z.string().max(255, "Item number too long"), z.number()]).transform(String),
-  item_name: z.string().min(1, "Item name is required"),
-  brand: z.string().optional().default("Unknown Brand"),
-  item_type: z.string().optional().default("General"),
-  location: z.string().optional().default("Unknown Location"),
-  // balance is automatically calculated by database as (in_qty - out_qty)
-  balance: z.number().min(0, "Balance cannot be negative"),
-  // item_status is automatically set by database trigger based on balance vs min_stock
-  item_status: z.string().optional(),
-})
+export const ApiUrlSchema = {
+  parse: (input: string) => {
+    if (typeof input !== 'string') throw new Error('URL must be a string')
+    try {
+      const url = new URL(input)
+      if (!url.protocol.startsWith('http')) throw new Error('URL must start with http:// or https://')
+      return input
+    } catch {
+      throw new Error('Invalid URL format')
+    }
+  }
+}
 
-export const ApiEmployeeSchema = z.object({
-  id: z.number(),
-  fullName: z.string().min(1, "Full name is required"),
-  firstName: z.string().min(1, "First name is required"),
-  lastName: z.string().min(1, "Last name is required"),
-  middleName: z.string().optional(),
-  idNumber: z.string().min(1, "ID number is required"),
-  idBarcode: z.string().min(1, "ID barcode is required"),
-  position: z.string().min(1, "Position is required"),
-  department: z.string().min(1, "Department is required"),
-  status: z.string().min(1, "Status is required"),
-  email: z.string().email("Invalid email format"),
-  contactNumber: z.string().optional(),
-  age: z.number().optional(),
-  birthDate: z.string(),
-  hireDate: z.string(),
-  isNewHire: z.boolean().default(false),
-  salary: z.string().optional(),
-  profilePicture: z.string().optional(),
-  document: z.string().optional(),
-  createdAt: z.string(),
-  address: z.string().optional(),
-  civilStatus: z.string().optional(),
-  pagibigNumber: z.string().optional(),
-  philhealthNumber: z.string().optional(),
-  sssNumber: z.string().optional(),
-  tinNumber: z.string().optional(),
-})
+export const SearchQuerySchema = {
+  parse: (input: string) => {
+    if (typeof input !== 'string') throw new Error('Search query must be a string')
+    const trimmed = input.trim()
+    if (trimmed.length > 100) throw new Error('Search query too long')
+    if (!/^[A-Za-z0-9\s._-]*$/.test(trimmed)) throw new Error('Search query contains invalid characters')
+    return trimmed
+  }
+}
 
-export const ApiResponseSchema = z.object({
-  success: z.boolean(),
-  data: z.any(),
-  message: z.string().optional(),
-  error: z.string().optional(),
-})
+// API response validation schemas (mock implementations)
+export const ApiItemSchema = {
+  parse: (input: any) => {
+    if (!input || typeof input !== 'object') throw new Error('Invalid item data')
+
+    const item = { ...input }
+
+    // Transform item_no to string if it's a number
+    if (typeof item.item_no === 'number') {
+      item.item_no = String(item.item_no)
+    } else if (typeof item.item_no === 'string') {
+      if (item.item_no.length > 255) throw new Error('Item number too long')
+    } else {
+      throw new Error('Item number is required')
+    }
+
+    if (!item.item_name || typeof item.item_name !== 'string' || item.item_name.length === 0) {
+      throw new Error('Item name is required')
+    }
+
+    // Set defaults for optional fields
+    item.brand = item.brand || 'Unknown Brand'
+    item.item_type = item.item_type || 'General'
+    item.location = item.location || 'Unknown Location'
+
+    // Validate balance
+    if (typeof item.balance !== 'number' || item.balance < 0) {
+      throw new Error('Balance must be a non-negative number')
+    }
+
+    return item
+  }
+}
+
+export const ApiEmployeeSchema = {
+  parse: (input: any) => {
+    if (!input || typeof input !== 'object') throw new Error('Invalid employee data')
+
+    // Basic validation - in demo mode, we accept most data
+    const requiredFields = ['id', 'fullName', 'firstName', 'lastName', 'idNumber', 'idBarcode', 'position', 'department', 'status']
+    for (const field of requiredFields) {
+      if (!input[field]) throw new Error(`${field} is required`)
+    }
+
+    return input
+  }
+}
+
+export const ApiResponseSchema = {
+  parse: (input: any) => {
+    if (!input || typeof input !== 'object') throw new Error('Invalid API response')
+    // Basic validation - accept any object with success field
+    if (typeof input.success !== 'boolean') throw new Error('Response must have success field')
+    return input
+  }
+}
 
 // Validation functions
 export function validateBarcode(input: string): { isValid: boolean; error?: string; value?: string } {
@@ -112,10 +151,7 @@ export function validateBarcode(input: string): { isValid: boolean; error?: stri
     const validated = BarcodeSchema.parse(input)
     return { isValid: true, value: validated }
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return { isValid: false, error: error.errors[0]?.message || "Invalid barcode" }
-    }
-    return { isValid: false, error: "Validation error" }
+    return { isValid: false, error: error instanceof Error ? error.message : "Invalid barcode" }
   }
 }
 
@@ -124,10 +160,7 @@ export function validateItemId(input: string): { isValid: boolean; error?: strin
     const validated = ItemIdSchema.parse(input)
     return { isValid: true, value: validated }
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return { isValid: false, error: error.errors[0]?.message || "Invalid item ID" }
-    }
-    return { isValid: false, error: "Validation error" }
+    return { isValid: false, error: error instanceof Error ? error.message : "Invalid item ID" }
   }
 }
 
@@ -136,10 +169,7 @@ export function validateQuantity(input: number): { isValid: boolean; error?: str
     const validated = QuantitySchema.parse(input)
     return { isValid: true, value: validated }
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return { isValid: false, error: error.errors[0]?.message || "Invalid quantity" }
-    }
-    return { isValid: false, error: "Validation error" }
+    return { isValid: false, error: error instanceof Error ? error.message : "Invalid quantity" }
   }
 }
 
@@ -148,10 +178,7 @@ export function validateEmployeeId(input: string): { isValid: boolean; error?: s
     const validated = EmployeeIdSchema.parse(input)
     return { isValid: true, value: validated }
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return { isValid: false, error: error.errors[0]?.message || "Invalid employee ID" }
-    }
-    return { isValid: false, error: "Validation error" }
+    return { isValid: false, error: error instanceof Error ? error.message : "Invalid employee ID" }
   }
 }
 
@@ -160,10 +187,7 @@ export function validateApiUrl(input: string): { isValid: boolean; error?: strin
     const validated = ApiUrlSchema.parse(input)
     return { isValid: true, value: validated }
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return { isValid: false, error: error.errors[0]?.message || "Invalid API URL" }
-    }
-    return { isValid: false, error: "Validation error" }
+    return { isValid: false, error: error instanceof Error ? error.message : "Invalid API URL" }
   }
 }
 
@@ -172,10 +196,7 @@ export function validateSearchQuery(input: string): { isValid: boolean; error?: 
     const validated = SearchQuerySchema.parse(input)
     return { isValid: true, value: validated }
   } catch (error) {
-    if (error instanceof z.ZodError) {
-      return { isValid: false, error: error.errors[0]?.message || "Invalid search query" }
-    }
-    return { isValid: false, error: "Validation error" }
+    return { isValid: false, error: error instanceof Error ? error.message : "Invalid search query" }
   }
 }
 
