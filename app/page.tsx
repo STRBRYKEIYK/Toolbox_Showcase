@@ -235,8 +235,6 @@ export default function HomePage() {
     return (
       <StartPage
         onStart={handleStartApp}
-        apiUrl={apiUrl}
-        onApiUrlChange={handleApiUrlChange}
         isConnected={isApiConnected}
         apiError={apiError}
         isTestingConnection={isTestingConnection}

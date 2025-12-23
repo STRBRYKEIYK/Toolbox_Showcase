@@ -2,7 +2,6 @@
 
 import { useState } from "react"
 import { 
-  Settings, 
   Wifi, 
   WifiOff, 
   Package,
@@ -14,15 +13,10 @@ import {
 
 import { Button } from "./ui/button"
 import { Card, CardContent } from "./ui/card"
-import { Input } from "./ui/input"
-import { Label } from "./ui/label"
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from "./ui/dialog"
 import { TipsAndTricks } from "./tips-and-tricks"
 
 interface StartPageProps {
   onStart: () => void
-  apiUrl: string
-  onApiUrlChange: (url: string) => void
   isConnected: boolean
   apiError?: string | null
   isTestingConnection?: boolean
@@ -32,22 +26,12 @@ interface StartPageProps {
 
 export function StartPage({
   onStart,
-  apiUrl,
-  onApiUrlChange,
   isConnected,
   apiError,
   isTestingConnection,
   hasCachedData = false,
   isDataLoading = false,
 }: StartPageProps) {
-  const [tempApiUrl, setTempApiUrl] = useState(apiUrl)
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
-
-  const handleSaveSettings = () => {
-    onApiUrlChange(tempApiUrl)
-    setIsSettingsOpen(false)
-  }
-
   const canStart = (isConnected || hasCachedData) && !isDataLoading
 
   // Status indicator
@@ -164,40 +148,6 @@ export function StartPage({
                 'Unavailable'
               )}
             </Button>
-
-            <Dialog open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
-              <DialogTrigger asChild>
-                <Button variant="ghost" className="w-full h-10 text-slate-400 hover:text-white hover:bg-slate-700/50">
-                  <Settings className="w-4 h-4 mr-2" />
-                  Settings
-                </Button>
-              </DialogTrigger>
-              <DialogContent className="sm:max-w-sm bg-slate-800 border-slate-700">
-                <DialogHeader>
-                  <DialogTitle className="text-white">API Settings</DialogTitle>
-                </DialogHeader>
-                <div className="space-y-4 py-4">
-                  <div className="space-y-2">
-                    <Label htmlFor="api-url" className="text-slate-300">Server URL</Label>
-                    <Input
-                      id="api-url"
-                      placeholder="https://api.example.com"
-                      value={tempApiUrl}
-                      onChange={(e) => setTempApiUrl(e.target.value)}
-                      className="font-mono text-sm bg-slate-700/50 border-slate-600 text-white"
-                    />
-                  </div>
-                  <div className="flex gap-2">
-                    <Button onClick={handleSaveSettings} className="flex-1 bg-teal-600 hover:bg-teal-700">
-                      Save
-                    </Button>
-                    <Button variant="outline" onClick={() => setIsSettingsOpen(false)} className="flex-1 border-slate-600 text-slate-300 hover:bg-slate-700">
-                      Cancel
-                    </Button>
-                  </div>
-                </div>
-              </DialogContent>
-            </Dialog>
           </div>
 
           {/* Footer */}
