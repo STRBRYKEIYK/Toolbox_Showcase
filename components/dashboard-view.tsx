@@ -1,0 +1,1800 @@
+import type React from "react"
+import { useState, useMemo, useEffect, useCallback } from "react"
+import { validateSearchQuery } from "../lib/validation"
+import { 
+  processBarcodeInput,
+  type Product
+} from "../lib/barcode-scanner"
+import { Filter, Grid, List, ChevronDown, RefreshCw, Settings, Download, FileText, FileSpreadsheet, Code, Package, Menu, X, Scan, Plus } from "lucide-react"
+import { useLoading } from "./loading-context"
+import { SearchLoader } from "./enhanced-loaders"
+import { Button } from "./ui/button"
+import { Input } from "./ui/input"
+import { Checkbox } from "./ui/checkbox"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select"
+import { Card, CardContent } from "./ui/card"
+import { Badge } from "./ui/badge"
+import { useToast } from "../hooks/use-toast"
+import { apiService } from "../lib/api_service"
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./ui/dialog"
+import { exportToCSV, exportToXLSX, exportToJSON, prepareExportData } from "../lib/export-utils"
+import { EnhancedItemCard } from "./enhanced-item-card"
+import { BulkOperationsBar, useBulkSelection } from "./bulk-operations"
+import useGlobalBarcodeScanner from "../hooks/use-global-barcode-scanner"
+import BarcodeModal from "./barcode-modal"
+import { useInventorySync } from "../hooks/useInventorySync"
+import { IndustrialTooltip } from "./ui/tooltip"
+import { SOCKET_EVENTS } from "../../src/utils/api/websocket/constants/events.js"
+import { pollingManager } from "../../src/utils/api/websocket/polling-manager.jsx"
+
+
+interface DashboardViewProps {
+  onAddToCart: (product: Product, quantity?: number, isFromBarcode?: boolean) => void
+  onViewItem: (product: Product) => void
+  searchQuery?: string
+  onRefreshData?: (refreshFunction: () => void) => void
+  apiUrl?: string
+  onApiUrlChange?: (url: string) => void
+  isConnected?: boolean
+  // New props to accept state from parent
+  products?: Product[]
+  setProducts?: React.Dispatch<React.SetStateAction<Product[]>>
+  isLoadingProducts?: boolean
+  setIsLoadingProducts?: React.Dispatch<React.SetStateAction<boolean>>
+  dataSource?: "api" | "cached"
+  setDataSource?: React.Dispatch<React.SetStateAction<"api" | "cached">>
+  lastFetchTime?: Date | null
+  setLastFetchTime?: React.Dispatch<React.SetStateAction<Date | null>>
+}
+
+export function DashboardView({ 
+  onAddToCart, 
+  onViewItem, 
+  searchQuery = "", 
+  onRefreshData,
+  apiUrl = "",
+  onApiUrlChange,
+  isConnected = false,
+  // Parent state props
+  products: parentProducts,
+  setProducts: parentSetProducts,
+  isLoadingProducts: parentIsLoadingData,
+  setIsLoadingProducts: parentSetIsLoadingData,
+  dataSource: parentDataSource,
+  setDataSource: parentSetDataSource,
+  lastFetchTime: parentLastFetchTime,
+  setLastFetchTime: parentSetLastFetchTime,
+}: DashboardViewProps) {
+  // Use parent state if available, otherwise fallback to local state
+  const [localProducts, setLocalProducts] = useState<Product[]>([])
+  const [localIsLoadingData, setLocalIsLoadingData] = useState(true)
+  const [localDataSource, setLocalDataSource] = useState<"api" | "cached">("cached")
+  const [localLastFetchTime, setLocalLastFetchTime] = useState<Date | null>(null)
+  
+  // Use parent state if provided, otherwise use local state
+  const products = parentProducts ?? localProducts
+  const setProducts = parentSetProducts ?? setLocalProducts
+  const isLoadingData = parentIsLoadingData ?? localIsLoadingData
+  const setIsLoadingData = parentSetIsLoadingData ?? setLocalIsLoadingData
+  const dataSource = parentDataSource ?? localDataSource
+  const setDataSource = parentSetDataSource ?? setLocalDataSource
+  const lastFetchTime = parentLastFetchTime ?? localLastFetchTime
+  const setLastFetchTime = parentSetLastFetchTime ?? setLocalLastFetchTime
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false)
+  const [tempApiUrl, setTempApiUrl] = useState(apiUrl)
+
+  // Keep tempApiUrl in sync with apiUrl prop
+  useEffect(() => {
+    setTempApiUrl(apiUrl)
+  }, [apiUrl])
+
+  const [viewMode, setViewMode] = useState<"grid" | "list">("grid")
+  // Multi-select category filter: tracks which categories are excluded (empty = all included)
+  const [excludedCategories, setExcludedCategories] = useState<Set<string>>(new Set())
+  const [showAvailable, setShowAvailable] = useState(true)
+  const [showUnavailable, setShowUnavailable] = useState(true)
+  const [localSearchQuery, setLocalSearchQuery] = useState("")
+  const [isSearching, setIsSearching] = useState(false)
+  const [sortBy, setSortBy] = useState("name-asc")
+  const [barcodeInput, setBarcodeInput] = useState("")
+  const [currentPage, setCurrentPage] = useState(1)
+  const [isLoadingMore, setIsLoadingMore] = useState(false)
+
+  const [isExporting, setIsExporting] = useState(false)
+  // Live updates: subscribe to inventory and procurement events
+  useInventorySync({
+    onInventoryChange: () => {
+      // silently refresh without extra toasts
+      fetchProductsFromAPI(false)
+    },
+    onCheckout: () => {
+      // ensure immediate refresh after successful checkout
+      fetchProductsFromAPI(false)
+    },
+    onPOChange: () => {
+      // PO changes can affect inventory soon after; refresh as well
+      fetchProductsFromAPI(false)
+    },
+    enabled: true,
+  })
+  // Note: Global barcode scanning is handled by GlobalBarcodeListener component
+  // The dashboard listens to 'scanned-barcode' events dispatched by that component
+  const [useEnhancedCards] = useState(true)
+
+  // Bulk selection state
+  const {
+    selectedItems,
+    selectAll,
+    clearSelection
+  } = useBulkSelection()
+  const [isOnline, setIsOnline] = useState(typeof window !== 'undefined' ? navigator.onLine : true)
+  const [isCategoriesCollapsed, setIsCategoriesCollapsed] = useState(false)
+  const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false)
+  const { toast } = useToast()
+  const { setSearchLoading } = useLoading()
+
+  // === Global Barcode modal state (reinstated) ===
+  const [isBarcodeModalOpen, setIsBarcodeModalOpen] = useState(false)
+  const [detectedBarcode, setDetectedBarcode] = useState<string | null>(null)
+  const [detectedProduct, setDetectedProduct] = useState<Product | null>(null)
+  const [isCheckoutModalOpen, setIsCheckoutModalOpen] = useState(false)
+
+  // Listen for checkout modal state to disable scanner when checkout is open
+  useEffect(() => {
+    const handleCheckoutModalChange = (event: Event) => {
+      const detail = (event as CustomEvent).detail
+      if (detail && typeof detail.isOpen === 'boolean') {
+        setIsCheckoutModalOpen(detail.isOpen)
+      }
+    }
+    window.addEventListener('checkout-modal-state', handleCheckoutModalChange as EventListener)
+    return () => window.removeEventListener('checkout-modal-state', handleCheckoutModalChange as EventListener)
+  }, [])
+
+  // Add to cart from modal, with availability guard
+  const handleModalAdd = useCallback((product: Product, quantity: number) => {
+    if (!product) return
+    if (!isAvailable(product, quantity)) {
+      toast({ title: '❌ Cannot Add', description: `${product.name} is out of stock or insufficient balance and was not added`, variant: 'destructive' })
+      return
+    }
+    onAddToCart(product, quantity, true)
+    toast({ title: '✅ Item Added', description: `${product.name} x${quantity} added to cart` })
+  }, [onAddToCart, toast])
+
+  // Handle detected barcode from global scanner
+  const onGlobalBarcodeDetected = useCallback((barcode: string) => {
+    const result = processBarcodeInput(barcode, products)
+    setDetectedBarcode(barcode)
+    setDetectedProduct(result.product ?? null)
+
+    // If modal already open, queue additional items so continuous scanning accumulates
+    if (isBarcodeModalOpen) {
+      if (result.success && result.product) {
+        if (isAvailable(result.product, 1)) {
+          window.dispatchEvent(new CustomEvent('scanned-barcode-append', { detail: { item: { product: result.product, quantity: 1 } } }))
+          toast({ title: '✅ Item Queued', description: `${result.product.name} queued for add` })
+        } else {
+          toast({ title: '❌ Not Available', description: `${result.product.name} is out of stock and will not be queued` })
+        }
+      } else {
+        toast({ title: '❌ Not Found', description: `Barcode ${barcode} not found` })
+      }
+      return
+    }
+
+    // Open modal and seed with first detected product if available
+    setIsBarcodeModalOpen(true)
+    // The modal reads detectedProduct via props
+  }, [products, isBarcodeModalOpen, toast])
+
+  // Start global scanner only on dashboard view (this component), and pause when checkout modal is open
+  useGlobalBarcodeScanner(onGlobalBarcodeDetected, { minLength: 3, interKeyMs: 80, enabled: !isCheckoutModalOpen })
+
+  // Helper: determine if a product is available for adding
+  const isAvailable = (p: Product | null | undefined, qty = 1) => {
+    if (!p) return false
+    // Treat any status string containing "out" (case-insensitive) as unavailable
+    const status = (p.status || '').toString().toLowerCase()
+    if (status.includes('out')) return false
+    if (typeof p.balance === 'number') {
+      if (p.balance <= 0) return false
+      if (qty && p.balance < qty) return false
+    }
+    return true
+  }
+
+  // Online/Offline status tracking
+  useEffect(() => {
+    const updateOnlineStatus = () => {
+      setIsOnline(navigator.onLine)
+    }
+
+    window.addEventListener('online', updateOnlineStatus)
+    window.addEventListener('offline', updateOnlineStatus)
+
+    return () => {
+      window.removeEventListener('online', updateOnlineStatus)
+      window.removeEventListener('offline', updateOnlineStatus)
+    }
+  }, [])
+
+  // Listen for clear-barcode-queue event (triggered after checkout)
+  useEffect(() => {
+    const handleClearQueue = () => {
+      console.log('[Dashboard] Barcode queue cleared after checkout')
+    }
+
+    window.addEventListener('clear-barcode-queue', handleClearQueue)
+    return () => window.removeEventListener('clear-barcode-queue', handleClearQueue)
+  }, [])
+
+  // Debounced search with loading states
+  useEffect(() => {
+    const searchTimer = setTimeout(() => {
+      setIsSearching(false)
+      setSearchLoading(false)
+    }, 300)
+
+    if (localSearchQuery.length > 0) {
+      setIsSearching(true)
+      setSearchLoading(true)
+    }
+
+    return () => {
+      clearTimeout(searchTimer)
+    }
+  }, [localSearchQuery, setSearchLoading, setIsSearching])
+
+
+
+  const ITEMS_PER_PAGE = 50
+
+
+  // Check if localStorage is available (not server-side rendering)
+  const isLocalStorageAvailable = () => {
+    if (typeof window === 'undefined') return false;
+    try {
+      // Test if localStorage is accessible
+      const testKey = '__test__';
+      localStorage.setItem(testKey, testKey);
+      localStorage.removeItem(testKey);
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
+  // Function to save products to localStorage
+  const saveProductsToLocalStorage = (products: Product[]) => {
+    if (!isLocalStorageAvailable()) {
+      console.log("[v0] localStorage not available, skipping save");
+      return;
+    }
+    
+    try {
+      localStorage.setItem('cached-products', JSON.stringify(products));
+      localStorage.setItem('cached-products-timestamp', new Date().toISOString());
+      console.log("[v0] Saved products to local storage:", products.length);
+    } catch (error) {
+      console.error("[v0] Error saving products to local storage:", error);
+    }
+  };
+
+  // Function to load products from localStorage
+  const loadProductsFromLocalStorage = (): { products: Product[] | null, timestamp: Date | null } => {
+    if (!isLocalStorageAvailable()) {
+      console.log("[v0] localStorage not available, cannot load products");
+      return { products: null, timestamp: null };
+    }
+    
+    try {
+      const productsJson = localStorage.getItem('cached-products');
+      const timestampStr = localStorage.getItem('cached-products-timestamp');
+      
+      if (!productsJson) {
+        console.log("[v0] No products found in local storage");
+        return { products: null, timestamp: null };
+      }
+      
+      const products = JSON.parse(productsJson) as Product[];
+      const timestamp = timestampStr ? new Date(timestampStr) : null;
+      
+      console.log("[v0] Loaded products from local storage:", products.length);
+      console.log("[v0] Local data timestamp:", timestamp);
+      
+      return { products, timestamp };
+    } catch (error) {
+      console.error("[v0] Error loading products from local storage:", error);
+      return { products: null, timestamp: null };
+    }
+  };
+
+  const fetchProductsFromAPI = async (showSuccessToast = true) => {
+    try {
+      setIsLoadingData(true)
+      console.log("[v0] Attempting to fetch products from API...")
+
+      const apiItems = await apiService.fetchItems()
+      console.log("[v0] API items received:", apiItems?.length)
+
+      // Check if apiItems is an array before mapping
+      if (!Array.isArray(apiItems)) {
+        throw new Error("API did not return an array of items")
+      }
+
+      console.log(apiItems)
+
+      // Transform API data to match our Product interface
+      // Trust the API/database to provide balance (calculated as in_qty - out_qty)
+      // and item_status (calculated by database trigger based on balance vs min_stock)
+      const transformedProducts: Product[] = apiItems.map((item: any, index: number) => ({
+        id: item.item_no?.toString() || item.id?.toString() || (index + 1).toString(),
+        name: item.item_name || item.name || item.title || `Item ${index + 1}`,
+        brand: item.brand || item.manufacturer || "Unknown Brand",
+        itemType: item.item_type || item.itemType || item.category || item.type || "General",
+        location: item.location || item.warehouse || "Unknown Location",
+        // Trust the database-calculated balance (in_qty - out_qty)
+        balance: item.balance ?? 0,
+        // Trust the database trigger's item_status calculation
+        status: (() => {
+          const apiStatus = (item.item_status || "").toLowerCase();
+          // Database returns: "Out of Stock", "Low in Stock", "In Stock"
+          if (apiStatus.includes('out of stock')) return "out-of-stock";
+          if (apiStatus.includes('low')) return "low-stock";
+          // Default to in-stock for "In Stock" or any unexpected values
+          return "in-stock";
+        })(),
+      }))
+
+      // Only update state if we got new/different data
+      const hasNewData = JSON.stringify(transformedProducts) !== JSON.stringify(products);
+      if (hasNewData) {
+        setProducts(transformedProducts)
+        setDataSource("api")
+        setLastFetchTime(new Date())
+        
+        // Save the API data to localStorage for offline use
+        saveProductsToLocalStorage(transformedProducts);
+
+        if (showSuccessToast) {
+          toast({
+            title: "Data Loaded",
+            description: `Successfully loaded ${transformedProducts.length} items from API`,
+            toastType: 'success',
+            duration: 4000
+          } as any)
+        }
+      } else {
+        console.log("[v0] API returned same data, no update needed");
+        if (showSuccessToast) {
+          toast({
+            title: "Data Up to Date",
+            description: `${transformedProducts.length} items are already current`,
+            toastType: 'info',
+            duration: 3000
+          } as any)
+        }
+      }
+    } catch (error) {
+      console.error("[v0] Failed to fetch from API, trying to use cached data:", error)
+      
+      // Only show fallback logic if we don't already have products loaded
+      if (products.length === 0) {
+        // Try to get data from localStorage first
+        const { products: cachedProducts, timestamp } = loadProductsFromLocalStorage();
+        
+        if (cachedProducts && cachedProducts.length > 0) {
+          // Use cached API data if available
+          setProducts(cachedProducts)
+          setDataSource("cached") // Mark as cached API data
+          setLastFetchTime(timestamp)
+          
+          const timeDiff = timestamp ? Math.round((new Date().getTime() - timestamp.getTime()) / (1000 * 60 * 60)) : null;
+          const timeMsg = timeDiff ? ` (from ${timeDiff} hour${timeDiff === 1 ? '' : 's'} ago)` : '';
+          
+          toast({
+            title: "Using Cached API Data",
+            description: `API unavailable. Using previously downloaded data${timeMsg}`,
+            variant: "default",
+          })
+        } else {
+          // No cached data available and API is down - show empty state
+          console.error("[v0] No cached data available and API is down");
+          setProducts([])
+          setDataSource("cached")
+          
+          toast({
+            title: "No Data Available",
+            description: "API unavailable and no previously downloaded data found. Please restore connection to load data.",
+            variant: "destructive",
+          })
+        }
+      }
+    } finally {
+      setIsLoadingData(false)
+    }
+  }
+
+  // Handlers are now defined above with useCallback
+
+  // Export handlers
+  const handleExportCSV = async () => {
+    try {
+      setIsExporting(true)
+      const exportData = prepareExportData(
+        products, 
+        apiUrl, 
+        isConnected, 
+        lastFetchTime?.toISOString() || null
+      )
+      
+      const filename = `toolbox-inventory-${new Date().toISOString().split('T')[0]}`
+      exportToCSV(exportData, { filename, includeMetadata: true })
+      
+      toast({
+        title: "Export Successful",
+        description: `Inventory data exported to ${filename}.csv`,
+        toastType: 'success',
+        duration: 4000
+      } as any)
+    } catch (error) {
+      console.error('Export to CSV failed:', error)
+      toast({
+        title: "Export Failed",
+        description: "Failed to export data to CSV. Please try again.",
+        variant: "destructive",
+        toastType: 'error',
+        duration: 5000
+      } as any)
+    } finally {
+      setIsExporting(false)
+    }
+  }
+
+  const handleExportXLSX = async () => {
+    try {
+      setIsExporting(true)
+      const exportData = prepareExportData(
+        products, 
+        apiUrl, 
+        isConnected, 
+        lastFetchTime?.toISOString() || null
+      )
+      
+      const filename = `toolbox-inventory-${new Date().toISOString().split('T')[0]}`
+      exportToXLSX(exportData, { filename, includeMetadata: true })
+      
+      toast({
+        title: "Export Successful",
+        description: `Inventory data exported to ${filename}.xlsx`,
+        toastType: 'success',
+        duration: 4000
+      } as any)
+    } catch (error) {
+      console.error('Export to XLSX failed:', error)
+      toast({
+        title: "Export Failed",
+        description: "Failed to export data to Excel. Please try again.",
+        variant: "destructive",
+        toastType: 'error',
+        duration: 5000
+      } as any)
+    } finally {
+      setIsExporting(false)
+    }
+  }
+
+  const handleExportJSON = async () => {
+    try {
+      setIsExporting(true)
+      const exportData = prepareExportData(
+        products, 
+        apiUrl, 
+        isConnected, 
+        lastFetchTime?.toISOString() || null
+      )
+      
+      const filename = `toolbox-inventory-${new Date().toISOString().split('T')[0]}`
+      exportToJSON(exportData, { filename, includeMetadata: true })
+      
+      toast({
+        title: "Export Successful",
+        description: `Inventory data exported to ${filename}.json`,
+        toastType: 'success',
+        duration: 4000
+      } as any)
+    } catch (error) {
+      console.error('Export to JSON failed:', error)
+      toast({
+        title: "Export Failed",
+        description: "Failed to export data to JSON. Please try again.",
+        variant: "destructive",
+        toastType: 'error',
+        duration: 5000
+      } as any)
+    } finally {
+      setIsExporting(false)
+    }
+  }
+
+  useEffect(() => {
+    // Skip initial data loading if parent is providing products state
+    if (parentProducts !== undefined) {
+      console.log("[v0] Using products from parent component, skipping initial fetch");
+      return;
+    }
+    
+    // Prevent duplicate API calls by checking if data is already loading or loaded
+    if (products.length > 0) {
+      console.log("[v0] Products already loaded, skipping fetch");
+      return;
+    }
+    
+    // Try to load cached data immediately while we wait for API response
+    const { products: cachedProducts, timestamp } = loadProductsFromLocalStorage();
+    
+    if (cachedProducts && cachedProducts.length > 0) {
+      console.log("[v0] Using cached data while fetching from API");
+      setProducts(cachedProducts);
+      setDataSource("cached");
+      setLastFetchTime(timestamp);
+      setIsLoadingData(false); // Show cached data immediately
+      
+      // Only fetch fresh data if cache is older than 5 minutes
+      const cacheAge = timestamp ? (Date.now() - timestamp.getTime()) / (1000 * 60) : Infinity;
+      if (cacheAge > 5) {
+        console.log("[v0] Cache is old, fetching fresh data");
+        fetchProductsFromAPI(false); // Don't show toast for background refresh
+      } else {
+        console.log("[v0] Cache is fresh, skipping API call");
+      }
+    } else {
+      // No cached data, just fetch from API
+      fetchProductsFromAPI(true); // Show toast for initial load
+    }
+  }, [parentProducts, products.length])
+
+
+  useEffect(() => {
+    if (onRefreshData) {
+      onRefreshData(handleRefreshData)
+    }
+  }, [onRefreshData])
+  
+  // Simple barcode processing function
+  const processBarcodeSubmit = useCallback((barcodeValue: string) => {
+    if (!barcodeValue.trim()) return;
+    
+    console.log("[Barcode Scanner] Processing:", barcodeValue);
+    
+    const result = processBarcodeInput(barcodeValue, products);
+    
+    if (result.success && result.product) {
+      console.log("[Barcode Scanner] Found item:", result.product.name);
+      
+      // Check availability
+      if (!isAvailable(result.product, 1)) {
+        console.log("[Barcode Scanner] Item is out of stock or insufficient balance");
+        toast({
+          title: "❌ Out of Stock",
+          description: `${result.product?.name || 'Item'} (${barcodeValue}) is currently out of stock or insufficient balance and cannot be added to cart`,
+          variant: "destructive",
+        });
+        setBarcodeInput("");
+        return;
+      }
+      
+      onAddToCart(result.product, 1, true); // Pass true for isFromBarcode
+      
+      // Show success feedback for barcode scanning specifically
+      toast({
+        title: "✅ Item Scanned & Added",
+        description: `${result.product.name} (${barcodeValue}) added to cart`,
+      });
+      
+      // Clear input after success
+      setBarcodeInput("");
+    } else {
+      console.log("[Barcode Scanner] Error:", result.error);
+      toast({
+        title: "❌ Item Not Found",
+        description: result.error || `Barcode ${barcodeValue} not found in inventory`,
+        variant: "destructive",
+      });
+    }
+  }, [products, onAddToCart, toast]);
+
+  // Listen for global scanned-barcode events dispatched by GlobalBarcodeListener
+  useEffect(() => {
+    const handler = (e: Event) => {
+      try {
+        const detail = (e as CustomEvent).detail || {}
+
+        // If bulk items payload
+        if (detail.items && Array.isArray(detail.items)) {
+          // Each item is { product: Product, quantity: number }
+          try {
+            const skipped: string[] = []
+            let addedCount = 0
+            detail.items.forEach((li: any) => {
+              if (!li || !li.product) return
+              const p: Product = li.product
+              const qty = Number(li.quantity || 0)
+              if (qty <= 0) return
+
+              if (p.status === 'out-of-stock' || (typeof p.balance === 'number' && p.balance <= 0)) {
+                skipped.push(p.name || String(p.id || 'Unknown'))
+                return
+              }
+
+              onAddToCart(p, qty, true)
+              addedCount++
+            })
+
+            if (skipped.length > 0) {
+              toast({ title: 'Skipped Items', description: `${skipped.length} item(s) were skipped because they are out of stock: ${skipped.join(', ')}`, variant: 'destructive' })
+            }
+
+            if (addedCount > 0) {
+              toast({ title: '✅ Items Added', description: `${addedCount} item(s) added to cart` })
+              window.dispatchEvent(new CustomEvent('toolbox-navigate', { detail: { view: 'cart' } }))
+            }
+          } catch (err) {
+            console.error('Error adding bulk scanned items', err)
+          }
+          return
+        }
+
+        const barcode = String(detail.barcode || '').trim()
+        if (barcode) {
+          processBarcodeSubmit(barcode)
+        }
+      } catch (err) {
+        console.error('scanned-barcode handler error', err)
+      }
+    }
+
+    window.addEventListener('scanned-barcode', handler as EventListener)
+    return () => window.removeEventListener('scanned-barcode', handler as EventListener)
+  }, [processBarcodeSubmit, onAddToCart, toast])
+
+  // Note: Global barcode scanning is handled by GlobalBarcodeListener component
+  // which dispatches 'scanned-barcode' events that we listen to above
+
+  // Update local search when header search changes
+  useEffect(() => {
+    // Validate and sanitize search query
+    if (searchQuery) {
+      const validation = validateSearchQuery(searchQuery);
+      if (validation.isValid) {
+        setLocalSearchQuery(validation.value!);
+      } else {
+        console.warn("[Dashboard] Invalid search query:", validation.error);
+        setLocalSearchQuery(""); // Clear invalid query
+      }
+    } else {
+      setLocalSearchQuery("");
+    }
+  }, [searchQuery])
+  
+  // Update tempApiUrl when apiUrl prop changes
+  useEffect(() => {
+    setTempApiUrl(apiUrl)
+  }, [apiUrl])
+
+  // Reset pagination when filters change
+  useEffect(() => {
+    setCurrentPage(1)
+  }, [excludedCategories, showAvailable, showUnavailable, searchQuery, localSearchQuery, sortBy])
+
+  // Get unique categories (memoized)
+  const categories = useMemo(() => {
+    const uniqueTypes = [...new Set(products.map((p) => p.itemType))]
+    return ["all", ...uniqueTypes]
+  }, [products])
+
+  // Memoized handlers to prevent unnecessary re-renders
+  const handleRefreshData = useCallback(() => {
+    fetchProductsFromAPI(true) // Show toast for manual refresh
+  }, []) // fetchProductsFromAPI will be stable
+  
+  const handleSaveSettings = useCallback(() => {
+    if (onApiUrlChange) {
+      onApiUrlChange(tempApiUrl)
+    }
+    setIsSettingsOpen(false)
+    // Refresh data after changing API URL
+    setTimeout(() => {
+      fetchProductsFromAPI(true) // Show toast for settings change
+    }, 500)
+  }, [tempApiUrl, onApiUrlChange]) // Dependencies are stable
+
+  // Handle barcode input submission
+  const handleBarcodeSubmit = useCallback(() => {
+    processBarcodeSubmit(barcodeInput)
+  }, [barcodeInput, processBarcodeSubmit])
+
+  // Handle Enter key in barcode input
+  const handleBarcodeKeyPress = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      handleBarcodeSubmit()
+    }
+  }, [handleBarcodeSubmit])
+
+  // Filter and sort products
+  const { paginatedProducts, totalFilteredCount, hasMorePages } = useMemo(() => {
+    const filtered = products.filter((product) => {
+      // Category filter - exclude products whose category is in the excluded set
+      if (excludedCategories.has(product.itemType)) {
+        return false
+      }
+
+      // Status filter
+      if (!showAvailable && (product.status === "in-stock" || product.status === "low-stock")) {
+        return false
+      }
+      if (!showUnavailable && product.status === "out-of-stock") {
+        return false
+      }
+
+      // Search filter (use both header search and local search)
+      const effectiveSearchQuery = searchQuery || localSearchQuery
+      if (effectiveSearchQuery) {
+        const query = effectiveSearchQuery.toLowerCase()
+        return (
+          product.name.toLowerCase().includes(query) ||
+          product.brand.toLowerCase().includes(query) ||
+          product.itemType.toLowerCase().includes(query) ||
+          product.location.toLowerCase().includes(query)
+        )
+      }
+
+      return true
+    })
+
+    // Sort products
+    filtered.sort((a, b) => {
+      switch (sortBy) {
+        case "name-asc":
+          return a.name.localeCompare(b.name)
+        case "name-desc":
+          return b.name.localeCompare(a.name)
+        case "stock-high":
+          return b.balance - a.balance
+        case "stock-low":
+          return a.balance - b.balance
+        default:
+          return 0
+      }
+    })
+
+    // Paginate results
+    const totalItems = filtered.length
+    const itemsToShow = currentPage * ITEMS_PER_PAGE
+    const paginatedResults = filtered.slice(0, itemsToShow)
+    const hasMore = itemsToShow < totalItems
+
+    return {
+      paginatedProducts: paginatedResults,
+      totalFilteredCount: totalItems,
+      hasMorePages: hasMore,
+    }
+  }, [products, excludedCategories, showAvailable, showUnavailable, searchQuery, localSearchQuery, sortBy, currentPage])
+
+  // Dynamic title based on category filter state
+  const itemsTitle = useMemo(() => {
+    const allCats = categories.filter(c => c !== "all")
+    const includedCategories = allCats.filter(cat => !excludedCategories.has(cat))
+    
+    // All categories hidden
+    if (includedCategories.length === 0) {
+      return "No Items to Show"
+    }
+    
+    // All categories shown
+    if (excludedCategories.size === 0) {
+      return "All Items"
+    }
+    
+    // Exactly one category shown
+    if (includedCategories.length === 1) {
+      return includedCategories[0]
+    }
+    
+    // Multiple but some filtered out
+    return "Filtered Items"
+  }, [categories, excludedCategories])
+
+  const handleLoadMore = () => {
+    setIsLoadingMore(true)
+    // Simulate loading delay
+    setTimeout(() => {
+      setCurrentPage((prev) => prev + 1)
+      setIsLoadingMore(false)
+    }, 500)
+  }
+
+  const getStatusColor = (status: Product["status"]) => {
+    switch (status) {
+      case "in-stock":
+        return "bg-green-500"
+      case "low-stock":
+        return "bg-orange-500"
+      case "out-of-stock":
+        return "bg-red-500"
+      default:
+        return "bg-gray-500"
+    }
+  }
+
+  const getStatusText = (status: Product["status"]) => {
+    switch (status) {
+      case "in-stock":
+        return "In Stock"
+      case "low-stock":
+        return "Low Stock"
+      case "out-of-stock":
+        return "Out of Stock"
+      default:
+        return "Unknown"
+    }
+  }
+  
+  /**
+   * Formats feedback messages for barcode scanning vs manual entry
+   */
+
+
+
+
+  /**
+   * Handles the barcode input change
+   * Detects if input is from scanner and acts accordingly
+   */
+  const handleBarcodeInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    setBarcodeInput(value);
+  };
+
+  // handleBarcodeSubmit is defined above with useCallback
+
+
+
+
+  
+  // Show empty state if no products are available
+  if (!isLoadingData && (!products || products.length === 0)) {
+    return (
+      <div className="flex min-h-[400px] bg-card rounded-lg shadow-sm border items-center justify-center">
+        <div className="text-center space-y-4 max-w-md p-6">
+          <div className="w-16 h-16 mx-auto text-slate-400 dark:text-slate-500">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M20 12H4M8 16l-4-4 4-4M16 16l4-4-4-4" />
+            </svg>
+          </div>
+          <h3 className="text-xl font-semibold text-slate-900 dark:text-slate-100">No Data Available</h3>
+          <p className="text-slate-600 dark:text-slate-400">
+            There are no items available. Please check your API connection and try again.
+          </p>
+          <Button 
+            onClick={handleRefreshData} 
+            className="mt-4"
+          >
+            <RefreshCw className="w-4 h-4 mr-2" />
+            Retry Connection
+          </Button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex min-h-[calc(100vh-5rem)] industrial-card metallic-texture">
+      {/* Global Barcode Modal (primary scanner UI) */}
+      <BarcodeModal
+        open={isBarcodeModalOpen}
+        initialValue={detectedBarcode ?? ''}
+        products={detectedProduct ? [detectedProduct] : []}
+        onClose={() => {
+          setIsBarcodeModalOpen(false)
+          setDetectedProduct(null)
+          setDetectedBarcode('')
+        }}
+        onConfirm={(payload: any) => {
+          // Bulk items payload
+          if (payload && payload.items && Array.isArray(payload.items)) {
+            const skipped: string[] = []
+            const addedCount = payload.items.reduce((acc: number, li: any) => {
+              if (!li || !li.product) return acc
+              const p: Product = li.product
+              const qty = Number(li.quantity || 0)
+              if (qty <= 0) return acc
+
+              if (!isAvailable(p, qty)) {
+                skipped.push(p.name || String(p.id || 'Unknown'))
+                return acc
+              }
+
+              onAddToCart(p, qty, true)
+              return acc + 1
+            }, 0)
+
+            if (skipped.length > 0) {
+              toast({ title: 'Skipped Items', description: `${skipped.length} item(s) were skipped because they are out of stock: ${skipped.join(', ')}`, variant: 'destructive' })
+            }
+
+            if (addedCount > 0) {
+              // Close the modal and open cart view only if at least one item was added
+              setIsBarcodeModalOpen(false)
+              setDetectedProduct(null)
+              setDetectedBarcode('')
+              window.dispatchEvent(new CustomEvent('toolbox-navigate', { detail: { view: 'cart' } }))
+            }
+
+            return
+          }
+
+          // Single barcode payload
+          const barcodeValue = String(payload?.barcode || '').trim()
+          const qty = Number(payload?.quantity || 1)
+          if (barcodeValue) {
+            if (detectedProduct) {
+              handleModalAdd(detectedProduct, qty)
+              // Close the modal and open cart
+              setIsBarcodeModalOpen(false)
+              setDetectedProduct(null)
+              setDetectedBarcode('')
+              window.dispatchEvent(new CustomEvent('toolbox-navigate', { detail: { view: 'cart' } }))
+            } else {
+              // Fallback to existing processor which looks up by barcode
+              processBarcodeSubmit(barcodeValue)
+            }
+          }
+        }}
+      />
+      {/* Note: Global Barcode Modal is handled by GlobalBarcodeListener component in layout.tsx */}
+      
+      {/* Mobile Sidebar Overlay */}
+      {isMobileSidebarOpen && (
+        <>
+          {/* Backdrop */}
+          <div
+            className="fixed inset-0 bg-black/50 z-40 lg:hidden"
+            onClick={() => setIsMobileSidebarOpen(false)}
+          />
+          {/* Mobile Drawer */}
+          <div className="fixed inset-y-0 left-0 w-64 bg-card border-r z-50 lg:hidden overflow-y-auto">
+            {/* Mobile Sidebar Header */}
+            <div className="p-4 border-b flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Filter className="w-4 h-4 text-muted-foreground" />
+                <h2 className="font-medium">Filters</h2>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-8 w-8"
+                onClick={() => setIsMobileSidebarOpen(false)}
+              >
+                <X className="w-4 h-4" />
+              </Button>
+            </div>
+
+            {/* Mobile Sidebar Content */}
+            <div className="p-4 space-y-6">
+              {/* View Mode */}
+              <div className="space-y-2">
+                <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">View Mode</h3>
+                <div className="flex border rounded-lg w-full">
+                  <Button
+                    variant={viewMode === "grid" ? "default" : "ghost"}
+                    size="sm"
+                    className="flex-1 h-9 gap-2"
+                    onClick={() => setViewMode("grid")}
+                  >
+                    <Grid className="w-4 h-4" />
+                    <span className="text-xs">Grid</span>
+                  </Button>
+                  <Button
+                    variant={viewMode === "list" ? "default" : "ghost"}
+                    size="sm"
+                    className="flex-1 h-9 gap-2"
+                    onClick={() => setViewMode("list")}
+                  >
+                    <List className="w-4 h-4" />
+                    <span className="text-xs">List</span>
+                  </Button>
+                </div>
+              </div>
+
+              {/* Sort By */}
+              <div className="space-y-2">
+                <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Sort By</h3>
+                <Select value={sortBy} onValueChange={setSortBy}>
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="name-asc">Name A-Z</SelectItem>
+                    <SelectItem value="name-desc">Name Z-A</SelectItem>
+                    <SelectItem value="stock-high">Stock High-Low</SelectItem>
+                    <SelectItem value="stock-low">Stock Low-High</SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+
+              {/* Categories */}
+              <div className="space-y-2">
+                <button
+                  onClick={() => setIsCategoriesCollapsed(!isCategoriesCollapsed)}
+                  className="w-full flex items-center justify-between py-1"
+                >
+                  <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-2">
+                    Categories
+                    {excludedCategories.size > 0 && (
+                      <span className="text-[10px] px-1.5 py-0.5 bg-destructive/20 text-destructive rounded-full normal-case">
+                        {excludedCategories.size} hidden
+                      </span>
+                    )}
+                  </h3>
+                  <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${isCategoriesCollapsed ? "-rotate-90" : ""}`} />
+                </button>
+                
+                {!isCategoriesCollapsed && (
+                  <div className="space-y-1 max-h-48 overflow-y-auto">
+                    <div className="flex gap-2 mb-2">
+                      <button
+                        onClick={() => setExcludedCategories(new Set())}
+                        className="flex-1 text-xs px-2 py-1 rounded bg-muted hover:bg-muted/80"
+                      >
+                        Show All
+                      </button>
+                      <button
+                        onClick={() => {
+                          const allCats = categories.filter(c => c !== "all")
+                          setExcludedCategories(new Set(allCats))
+                        }}
+                        className="flex-1 text-xs px-2 py-1 rounded bg-muted hover:bg-muted/80"
+                      >
+                        Hide All
+                      </button>
+                    </div>
+                    {categories.filter(cat => cat !== "all").map((cat) => {
+                      const isExcluded = excludedCategories.has(cat)
+                      const itemCount = products.filter((p) => p.itemType === cat).length
+                      return (
+                        <button
+                          key={cat}
+                          onClick={() => {
+                            setExcludedCategories(prev => {
+                              const newSet = new Set(prev)
+                              if (newSet.has(cat)) newSet.delete(cat)
+                              else newSet.add(cat)
+                              return newSet
+                            })
+                          }}
+                          className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm ${
+                            isExcluded ? "text-muted-foreground line-through opacity-60" : "text-foreground hover:bg-muted"
+                          }`}
+                        >
+                          <div className={`w-3 h-3 rounded border flex items-center justify-center shrink-0 ${
+                            isExcluded ? "border-muted-foreground" : "border-primary bg-primary"
+                          }`}>
+                            {!isExcluded && (
+                              <svg className="w-2 h-2 text-primary-foreground" fill="currentColor" viewBox="0 0 20 20">
+                                <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                              </svg>
+                            )}
+                          </div>
+                          <span className="truncate flex-1 text-left">{cat}</span>
+                          <span className="text-xs text-muted-foreground">{itemCount}</span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Availability */}
+              <div className="space-y-2">
+                <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Availability</h3>
+                <div className="space-y-2">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <Checkbox 
+                      checked={showAvailable} 
+                      onCheckedChange={(checked) => setShowAvailable(checked === true)}
+                    />
+                    <span className="text-sm">In Stock</span>
+                  </label>
+                  
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <Checkbox 
+                      checked={showUnavailable} 
+                      onCheckedChange={(checked) => setShowUnavailable(checked === true)}
+                    />
+                    <span className="text-sm">Out of Stock</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* Status */}
+              <div className="space-y-2">
+                <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Status</h3>
+                <div className="space-y-2 text-sm">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-orange-500'}`}></div>
+                      <span className="text-muted-foreground">API</span>
+                    </div>
+                    <span className={isConnected ? "text-green-600" : "text-orange-600"}>
+                      {isConnected ? "Connected" : "Disconnected"}
+                    </span>
+                  </div>
+                  
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                      <span className="text-muted-foreground">Network</span>
+                    </div>
+                    <span className={isOnline ? "text-green-600" : "text-red-600"}>
+                      {isOnline ? "Online" : "Offline"}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* Desktop Sidebar - Sticky position to follow scroll */}
+      <div className="hidden lg:flex lg:flex-col w-64 bg-card border-r shrink-0">
+        <div className="sticky top-0 h-[calc(100vh-5rem)] overflow-y-auto">
+          {/* Sidebar Header */}
+          <div className="p-4 border-b sticky top-0 bg-card z-10">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Filter className="w-4 h-4 text-muted-foreground" />
+              <h2 className="font-medium text-foreground">Filters</h2>
+            </div>
+            <div className="flex gap-1">
+              <IndustrialTooltip content="Settings and export options">
+                <Button 
+                  variant="ghost" 
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={() => setIsSettingsOpen(true)} 
+                >
+                  <Settings className="w-4 h-4 text-muted-foreground" />
+                </Button>
+              </IndustrialTooltip>
+              <IndustrialTooltip content="Refresh inventory data">
+                <Button 
+                  variant="ghost" 
+                  size="icon"
+                  className="h-8 w-8"
+                  onClick={handleRefreshData} 
+                  disabled={isLoadingData} 
+                >
+                  <RefreshCw className={`w-4 h-4 text-muted-foreground ${isLoadingData ? "animate-spin" : ""}`} />
+                </Button>
+              </IndustrialTooltip>
+            </div>
+          </div>
+        </div>
+
+        {/* Sidebar Content */}
+        <div className="p-4 space-y-6">
+
+          {/* View Mode */}
+          <div className="space-y-2">
+            <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">View Mode</h3>
+            <div className="flex border rounded-lg w-full">
+              <IndustrialTooltip content="Grid view">
+                <Button
+                  variant={viewMode === "grid" ? "default" : "ghost"}
+                  size="sm"
+                  className="flex-1 h-9 gap-2"
+                  onClick={() => setViewMode("grid")}
+                >
+                  <Grid className="w-4 h-4" />
+                  <span className="text-xs">Grid</span>
+                </Button>
+              </IndustrialTooltip>
+              <IndustrialTooltip content="List view">
+                <Button
+                  variant={viewMode === "list" ? "default" : "ghost"}
+                  size="sm"
+                  className="flex-1 h-9 gap-2"
+                  onClick={() => setViewMode("list")}
+                >
+                  <List className="w-4 h-4" />
+                  <span className="text-xs">List</span>
+                </Button>
+              </IndustrialTooltip>
+            </div>
+          </div>
+
+          {/* Sort By */}
+          <div className="space-y-2">
+            <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Sort By</h3>
+            <IndustrialTooltip content="Sort items by name or stock level">
+              <Select value={sortBy} onValueChange={setSortBy}>
+                <SelectTrigger className="w-full">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="name-asc">Name A-Z</SelectItem>
+                  <SelectItem value="name-desc">Name Z-A</SelectItem>
+                  <SelectItem value="stock-high">Stock High-Low</SelectItem>
+                  <SelectItem value="stock-low">Stock Low-High</SelectItem>
+                </SelectContent>
+              </Select>
+            </IndustrialTooltip>
+          </div>
+        
+        {/* Settings Dialog - Clean & Minimal */}
+        <Dialog open={isSettingsOpen} onOpenChange={setIsSettingsOpen}>
+          <DialogContent className="sm:max-w-md">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Settings className="w-5 h-5" />
+                <span>Settings</span>
+              </DialogTitle>
+            </DialogHeader>
+            <div className="py-4 space-y-4">
+              {/* Status Section */}
+              <div className="rounded-lg border p-3 space-y-2">
+                <h4 className="text-sm font-medium">System Status</h4>
+                <div className="grid grid-cols-2 gap-3 text-sm">
+                  <div className="flex items-center gap-2">
+                    <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-orange-500'}`} />
+                    <span className="text-muted-foreground">API:</span>
+                    <span className={isConnected ? 'text-green-600' : 'text-orange-600'}>
+                      {isConnected ? 'Connected' : 'Offline'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`} />
+                    <span className="text-muted-foreground">Network:</span>
+                    <span className={isOnline ? 'text-green-600' : 'text-red-600'}>
+                      {isOnline ? 'Online' : 'Offline'}
+                    </span>
+                  </div>
+                </div>
+                {lastFetchTime && (
+                  <p className="text-xs text-muted-foreground pt-1 border-t">
+                    Last sync: {lastFetchTime.toLocaleString()}
+                  </p>
+                )}
+              </div>
+              
+              {/* Export Section */}
+              <div className="rounded-lg border p-3 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-medium">Export Inventory</h4>
+                  <span className="text-xs text-muted-foreground">{products.length} items</span>
+                </div>
+                <div className="flex gap-2">
+                  <IndustrialTooltip content="Export as CSV file">
+                    <Button 
+                      onClick={handleExportCSV} 
+                      disabled={isExporting || products.length === 0}
+                      size="sm"
+                      variant="outline"
+                      className="flex-1"
+                    >
+                      <FileText className="w-4 h-4 mr-1" />
+                      CSV
+                    </Button>
+                  </IndustrialTooltip>
+                  <IndustrialTooltip content="Export as Excel file">
+                    <Button 
+                      onClick={handleExportXLSX} 
+                      disabled={isExporting || products.length === 0}
+                      size="sm"
+                      variant="outline"
+                      className="flex-1"
+                    >
+                      <FileSpreadsheet className="w-4 h-4 mr-1" />
+                      Excel
+                    </Button>
+                  </IndustrialTooltip>
+                  <IndustrialTooltip content="Export as JSON file">
+                    <Button 
+                      onClick={handleExportJSON} 
+                      disabled={isExporting || products.length === 0}
+                      size="sm"
+                      variant="outline"
+                      className="flex-1"
+                    >
+                      <Code className="w-4 h-4 mr-1" />
+                      JSON
+                    </Button>
+                  </IndustrialTooltip>
+                </div>
+              </div>
+
+              {/* Actions */}
+              <div className="flex gap-2 pt-2">
+                <IndustrialTooltip content="Refresh inventory data from server">
+                  <Button onClick={handleRefreshData} disabled={isLoadingData} className="flex-1">
+                    <RefreshCw className={`w-4 h-4 mr-2 ${isLoadingData ? 'animate-spin' : ''}`} />
+                    Refresh Data
+                  </Button>
+                </IndustrialTooltip>
+                <IndustrialTooltip content="Close settings dialog">
+                  <Button variant="outline" onClick={() => setIsSettingsOpen(false)}>
+                    Close
+                  </Button>
+                </IndustrialTooltip>
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
+
+          {/* Barcode Scanner Card (manual) - hidden, global scanner + modal is the primary */}
+          {false && (
+            <div className="bg-card backdrop-blur-sm border border-border rounded-xl p-4 shadow-sm">
+              <div className="space-y-3">
+                <h3 className="text-sm font-medium text-foreground flex items-center gap-2">
+                  <div className="w-5 h-5 bg-linear-to-br from-blue-400 to-indigo-500 rounded-md flex items-center justify-center">
+                    <Scan className="w-3 h-3 text-white" />
+                  </div>
+                  Barcode Scanner
+                </h3>
+                <div className="space-y-3">
+                  <Input id="barcode-scanner-input" placeholder="Click here first, then scan" value={barcodeInput} onChange={handleBarcodeInputChange} onKeyPress={handleBarcodeKeyPress} />
+                  <Button size="sm" onClick={handleBarcodeSubmit} disabled={!barcodeInput.trim()}>
+                    <Plus className="w-4 h-4 mr-2" />
+                    Add to Cart
+                  </Button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Categories Card - Collapsible */}
+          <div className="space-y-2">
+            <button 
+              onClick={() => setIsCategoriesCollapsed(!isCategoriesCollapsed)}
+              className="w-full flex items-center justify-between py-1"
+            >
+              <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide flex items-center gap-2">
+                Categories
+                {excludedCategories.size > 0 && (
+                  <span className="text-[10px] px-1.5 py-0.5 bg-destructive/20 text-destructive rounded-full normal-case">
+                    {excludedCategories.size} hidden
+                  </span>
+                )}
+              </h3>
+              <ChevronDown className={`w-4 h-4 text-muted-foreground transition-transform ${
+                isCategoriesCollapsed ? 'rotate-180' : ''
+              }`} />
+            </button>
+            
+            <div className={`overflow-hidden transition-all ${
+              isCategoriesCollapsed ? 'max-h-0' : 'max-h-64 overflow-y-auto'
+            }`}>
+              {/* Quick actions */}
+              <div className="flex gap-2 mb-2">
+                <button
+                  onClick={() => setExcludedCategories(new Set())}
+                  className="flex-1 text-xs px-2 py-1 rounded bg-muted hover:bg-muted/80 transition-colors"
+                >
+                  Show All
+                </button>
+                <button
+                  onClick={() => {
+                    const allCats = categories.filter(c => c !== "all")
+                    setExcludedCategories(new Set(allCats))
+                  }}
+                  className="flex-1 text-xs px-2 py-1 rounded bg-muted hover:bg-muted/80 transition-colors"
+                >
+                  Hide All
+                </button>
+              </div>
+              <div className="space-y-1">
+                {categories.filter(category => category !== "all").map((category) => {
+                  const isExcluded = excludedCategories.has(category)
+                  const itemCount = products.filter((p) => p.itemType === category).length
+                  return (
+                    <button
+                      key={category}
+                      className={`w-full flex items-center gap-2 px-2 py-1.5 rounded text-sm transition-colors ${
+                        isExcluded
+                          ? "text-muted-foreground line-through opacity-60"
+                          : "text-foreground hover:bg-muted"
+                      }`}
+                      onClick={() => {
+                        setExcludedCategories(prev => {
+                          const newSet = new Set(prev)
+                          if (newSet.has(category)) {
+                            newSet.delete(category)
+                          } else {
+                            newSet.add(category)
+                          }
+                          return newSet
+                        })
+                      }}
+                    >
+                      <div className={`w-3 h-3 rounded border flex items-center justify-center shrink-0 ${
+                        isExcluded ? "border-muted-foreground" : "border-primary bg-primary"
+                      }`}>
+                        {!isExcluded && (
+                          <svg className="w-2 h-2 text-primary-foreground" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
+                          </svg>
+                        )}
+                      </div>
+                      <span className="truncate flex-1 text-left">{category}</span>
+                      <span className="text-xs text-muted-foreground">{itemCount}</span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* Availability Filter */}
+          <div className="space-y-2">
+            <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Availability</h3>
+            <div className="space-y-2">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <Checkbox 
+                  checked={showAvailable} 
+                  onCheckedChange={(checked) => setShowAvailable(checked === true)}
+                />
+                <span className="text-sm">In Stock</span>
+              </label>
+              
+              <label className="flex items-center gap-2 cursor-pointer">
+                <Checkbox 
+                  checked={showUnavailable} 
+                  onCheckedChange={(checked) => setShowUnavailable(checked === true)}
+                />
+                <span className="text-sm">Out of Stock</span>
+              </label>
+            </div>
+          </div>
+
+          {/* System Status */}
+          <div className="space-y-2">
+            <h3 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Status</h3>
+            <div className="space-y-2 text-sm">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-orange-500'}`}></div>
+                  <span className="text-muted-foreground">API</span>
+                </div>
+                <span className={isConnected ? "text-green-600" : "text-orange-600"}>
+                  {isConnected ? "Connected" : "Disconnected"}
+                </span>
+              </div>
+              
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <div className={`w-2 h-2 rounded-full ${isOnline ? 'bg-green-500' : 'bg-red-500'}`}></div>
+                  <span className="text-muted-foreground">Network</span>
+                </div>
+                <span className={isOnline ? "text-green-600" : "text-red-600"}>
+                  {isOnline ? "Online" : "Offline"}
+                </span>
+              </div>
+              
+              {lastFetchTime && (
+                <p className="text-xs text-muted-foreground pt-1">
+                  Updated {lastFetchTime.toLocaleTimeString()}
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col h-full overflow-hidden">
+        <div className="flex-1 overflow-y-auto p-4 lg:p-6">
+          {/* Top Controls */}
+          <div className="mb-6">
+            {/* Desktop Layout */}
+            <div className="hidden lg:flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <h1 className="text-xl font-semibold">{itemsTitle}</h1>
+                <span className="text-sm text-muted-foreground">
+                  {paginatedProducts.length} of {totalFilteredCount}
+                </span>
+              </div>
+            </div>
+
+            {/* Mobile Layout */}
+            <div className="lg:hidden space-y-3">
+              <div className="flex items-center gap-2">
+                <IndustrialTooltip content="Open filters and settings">
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    className="h-9 w-9 shrink-0"
+                    onClick={() => setIsMobileSidebarOpen(true)}
+                  >
+                    <Menu className="w-4 h-4" />
+                  </Button>
+                </IndustrialTooltip>
+                
+                <div className="flex-1 min-w-0">
+                  <h1 className="text-base font-semibold truncate">{itemsTitle}</h1>
+                  <span className="text-xs text-muted-foreground">
+                    {paginatedProducts.length} of {totalFilteredCount}
+                  </span>
+                </div>
+
+                <div className="flex border rounded-lg shrink-0">
+                  <IndustrialTooltip content="Grid view">
+                    <Button
+                      variant={viewMode === "grid" ? "default" : "ghost"}
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setViewMode("grid")}
+                    >
+                      <Grid className="w-4 h-4" />
+                    </Button>
+                  </IndustrialTooltip>
+                  <IndustrialTooltip content="List view">
+                    <Button
+                      variant={viewMode === "list" ? "default" : "ghost"}
+                      size="icon"
+                      className="h-8 w-8"
+                      onClick={() => setViewMode("list")}
+                    >
+                      <List className="w-4 h-4" />
+                    </Button>
+                  </IndustrialTooltip>
+                </div>
+
+                <IndustrialTooltip content="Sort items">
+                  <Select value={sortBy} onValueChange={setSortBy}>
+                    <SelectTrigger className="w-24 h-8 text-xs shrink-0">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="name-asc" className="text-xs">A-Z</SelectItem>
+                      <SelectItem value="name-desc" className="text-xs">Z-A</SelectItem>
+                      <SelectItem value="stock-high" className="text-xs">High Stock</SelectItem>
+                      <SelectItem value="stock-low" className="text-xs">Low Stock</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </IndustrialTooltip>
+              </div>
+
+              {searchQuery && (
+                <Badge variant="outline" className="text-xs">
+                  Searching: "{searchQuery}"
+                </Badge>
+              )}
+            </div>
+          </div>
+
+          {/* Bulk Operations */}
+          <BulkOperationsBar
+            selectedItems={selectedItems}
+            products={products}
+            onSelectAll={(shouldSelectAll) => selectAll(products.map(p => p.id), shouldSelectAll)}
+            onClearSelection={clearSelection}
+            onBulkAddToCart={(bulkProducts) => {
+              const skipped: string[] = []
+              let added = 0
+              bulkProducts.forEach(product => {
+                if (!isAvailable(product)) {
+                  skipped.push(product.name || String(product.id || 'Unknown'))
+                  return
+                }
+                onAddToCart(product)
+                added++
+              })
+
+              if (skipped.length > 0) {
+                toast({ title: 'Skipped Items', description: `${skipped.length} item(s) were skipped because they are out of stock: ${skipped.join(', ')}`, variant: 'destructive' })
+              }
+
+              if (added > 0) {
+                toast({ title: `Added ${added} items to cart`, description: `${added} products were successfully added to your cart.` })
+              }
+            }}
+            onBulkExport={async (selectedProducts, format) => {
+              try {
+                // Use existing export functionality
+                const exportData = prepareExportData(selectedProducts)
+                
+                let filename = `selected_products_${new Date().toISOString().split('T')[0]}`
+                
+                switch (format) {
+                  case 'csv':
+                    exportToCSV(exportData, { filename: `${filename}.csv` })
+                    break
+                  case 'xlsx':
+                    exportToXLSX(exportData, { filename: `${filename}.xlsx` })
+                    break
+                  case 'json':
+                    exportToJSON(exportData, { filename: `${filename}.json` })
+                    break
+                }
+                
+                toast({
+                  title: "Export Successful",
+                  description: `${selectedProducts.length} items exported as ${format.toUpperCase()}`
+                })
+              } catch (error) {
+                console.error('Export failed:', error)
+                toast({
+                  title: "Export Failed",
+                  description: "Failed to export selected items",
+                  variant: "destructive"
+                })
+              }
+            }}
+          />
+
+          {/* Products Display */}
+          {isLoadingData || isSearching ? (
+            <SearchLoader query={searchQuery || localSearchQuery} />
+          ) : paginatedProducts.length === 0 ? (
+            <Card>
+              <CardContent className="p-8 text-center">
+                <p className="text-muted-foreground text-lg">No items found</p>
+                <p className="text-muted-foreground text-sm mt-2">
+                  {searchQuery || localSearchQuery
+                    ? "Try adjusting your search or filters"
+                    : "Try adjusting your filters"}
+                </p>
+              </CardContent>
+            </Card>
+          ) : (
+            <>
+              {viewMode === "grid" ? (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 gap-3 sm:gap-3 md:gap-4 pb-6">
+                  {paginatedProducts.map((product) => 
+                    useEnhancedCards ? (
+                      <EnhancedItemCard
+                        key={product.id}
+                        product={product}
+                        onAddToCart={onAddToCart}
+                        onViewItem={onViewItem}
+                        viewMode="grid"
+                      />
+                    ) : (
+                      <Card key={product.id} className="cursor-pointer hover:shadow-md transition-shadow">
+                        <CardContent className="p-2" onClick={() => onViewItem(product)}>
+                          <div className="aspect-square bg-slate-100 dark:bg-slate-700 rounded-md mb-2 flex items-center justify-center text-slate-500 dark:text-slate-400 text-xs">
+                            image
+                          </div>
+
+                          <h3 className="font-medium text-xs mb-1 line-clamp-2 dark:text-slate-100 leading-tight">{product.name}</h3>
+                          <p className="text-[10px] text-slate-600 dark:text-slate-400 mb-0.5 leading-tight">Brand: {product.brand}</p>
+                          <p className="text-[10px] text-slate-600 dark:text-slate-400 mb-1.5 leading-tight">Bal: {product.balance}</p>
+
+                          <div className="flex items-center justify-between">
+                            <Badge className={`${getStatusColor(product.status)} text-white text-[10px] py-0 px-1.5 h-4`}>
+                              {getStatusText(product.status)}
+                            </Badge>
+                            <Button
+                              size="sm"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                onAddToCart(product)
+                              }}
+                              disabled={product.status === "out-of-stock"}
+                              className="h-6 text-xs px-2"
+                            >
+                              Add
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )
+                  )}
+                </div>
+              ) : (
+                <div className="space-y-3 pb-4">
+                  {paginatedProducts.map((product) => 
+                    useEnhancedCards ? (
+                      <EnhancedItemCard
+                        key={product.id}
+                        product={product}
+                        onAddToCart={onAddToCart}
+                        onViewItem={onViewItem}
+                        viewMode="list"
+                      />
+                    ) : (
+                      <Card key={product.id} className="cursor-pointer hover:shadow-md transition-shadow">
+                        <CardContent className="p-4" onClick={() => onViewItem(product)}>
+                          <div className="flex items-center space-x-4">
+                            <div className="w-20 h-20 bg-slate-100 dark:bg-slate-700 rounded-lg flex items-center justify-center text-slate-500 dark:text-slate-400 text-sm shrink-0">
+                              img
+                            </div>
+
+                            <div className="flex-1 min-w-0">
+                              <h3 className="font-medium text-base mb-1 dark:text-slate-100 truncate">{product.name}</h3>
+                              <div className="text-sm text-slate-600 dark:text-slate-400 space-y-1">
+                                <p>{product.brand} • {product.itemType}</p>
+                                <p>{product.location}</p>
+                              </div>
+                            </div>
+
+                            <div className="text-right shrink-0">
+                              <div className="text-lg font-bold dark:text-slate-100 mb-2">
+                                {product.balance.toString().padStart(2, "0")}
+                              </div>
+                              <Badge className={`${getStatusColor(product.status)} text-white text-sm py-1 px-3 h-7`}>
+                                {getStatusText(product.status)}
+                              </Badge>
+                            </div>
+
+                            <Button
+                              size="sm"
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                onAddToCart(product)
+                              }}
+                              disabled={product.status === "out-of-stock"}
+                              className="h-10 text-sm px-4"
+                            >
+                              Add
+                            </Button>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )
+                  )}
+                </div>
+              )}
+
+              {/* Load More Button */}
+              {hasMorePages && (
+                <div className="flex justify-center pb-6">
+                  <IndustrialTooltip content={`Load ${totalFilteredCount - paginatedProducts.length} more items`}>
+                    <Button
+                      variant="outline"
+                      size="lg"
+                      onClick={handleLoadMore}
+                      disabled={isLoadingMore}
+                      className="bg-white dark:bg-slate-800 border-slate-300 dark:border-slate-600 hover:bg-slate-50 dark:hover:bg-slate-700 text-slate-900 dark:text-slate-100"
+                    >
+                      {isLoadingMore ? (
+                        <div className="flex items-center space-x-2">
+                          <div className="w-4 h-4 border-2 border-teal-600 border-t-transparent rounded-full animate-spin" />
+                          <span>Loading more items...</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center space-x-2">
+                          <ChevronDown className="w-4 h-4" />
+                          <span>Load More ({totalFilteredCount - paginatedProducts.length} remaining)</span>
+                        </div>
+                      )}
+                    </Button>
+                  </IndustrialTooltip>
+                </div>
+              )}
+
+              {/* Pagination Info */}
+              <div className="text-center text-sm text-slate-500 dark:text-slate-400 pb-6 bg-slate-50 dark:bg-slate-900 px-4 py-2 rounded">
+                Showing {paginatedProducts.length} of {totalFilteredCount} items
+                {currentPage > 1 && (
+                  <span className="ml-2">
+                    • Page {currentPage} of {Math.ceil(totalFilteredCount / ITEMS_PER_PAGE)}
+                  </span>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+      
+
+      
+
+    </div>
+  )
+}
